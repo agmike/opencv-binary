@@ -72,10 +72,42 @@ patch_xcframework_remove_symlinks() {
         rm -rf "${TMP_DIR}"
         mv "${framework}" "${TMP_DIR}"
         mv "${TMP_DIR}/Versions/A" "${framework}"
-        mv "${framework}/Resources/Info.plist" "${framework}/Info.plist"
+        mv "${framework}/Resources/"* "${framework}/"
         rm -rf "${framework}/Resources"
         rm -rf "${TMP_DIR}"
     done
+
+    # Flattening the framework changes the binary path recorded by xcodebuild.
+    python3 - "${OUTPUT_DIR}/opencv2.xcframework/Info.plist" <<'PY'
+import plistlib
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+info = plistlib.loads(path.read_bytes())
+for library in info["AvailableLibraries"]:
+    if "BinaryPath" in library:
+        framework = Path(library["LibraryPath"])
+        library["BinaryPath"] = str(framework / framework.stem)
+
+    # OpenCV copies headers from only the first architecture into a fat framework.
+    platform = "iphonesimulator" if library.get("SupportedPlatformVariant") == "simulator" else "iphoneos"
+    headers = sorted((path.parent.parent / platform / "build").glob(
+        "build-*/install/lib/opencv2.framework/Headers/opencv2-Swift.h"
+    ))
+    if len(headers) > 1:
+        prefix = "#if 0\n"
+        suffix = "\n#else\n#error unsupported Swift architecture\n#endif\n"
+        branches = []
+        for header in headers:
+            contents = header.read_text()
+            assert contents.startswith(prefix) and contents.endswith(suffix), header
+            branches.append(contents[len(prefix):-len(suffix)])
+        destination = path.parent / library["LibraryIdentifier"] / library["LibraryPath"] / "Headers/opencv2-Swift.h"
+        destination.write_text(prefix + "".join(branches) + suffix)
+with path.open("wb") as output:
+    plistlib.dump(info, output, sort_keys=False)
+PY
 }
 
 # Disable iOS visibility warnings
@@ -134,6 +166,19 @@ build_4_9_0() {
     export PATH="$(pwd)/${BUILD_DIR}:${PATH}"
 
     build_xcframework_excluding_modules 4.9.0
+    patch_xcframework_remove_symlinks
+}
+
+build_4_10_0() {
+    clone 4.10.0
+    disable_ios_visibility_warnings 4.10.0
+
+    # Fix PATH to find python
+    # See: https://github.com/opencv/opencv/issues/21926#issuecomment-1156755364
+    ln -s "$(which python3)" "$(pwd)/${BUILD_DIR}/python"
+    export PATH="$(pwd)/${BUILD_DIR}:${PATH}"
+
+    build_xcframework_excluding_modules 4.10.0
     patch_xcframework_remove_symlinks
 }
 
